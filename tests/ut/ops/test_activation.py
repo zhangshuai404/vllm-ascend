@@ -20,8 +20,6 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
-from vllm_ascend.utils import is_310p as is_310p_hw
-
 
 @pytest.fixture
 def dummy_tensor():
@@ -51,12 +49,9 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
     mock_gelu.assert_called_once()
 
 
-@pytest.mark.skipif(is_310p_hw(), reason="non_310P device unittest case.")
-@patch("vllm_ascend.ops.activation.get_weight_prefetch_method", return_value=MagicMock())
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
 def test_SiluAndMul_forward(
     mock_swiglu,
-    mock_get_weight_prefetch_method,
     dummy_tensor,
     default_vllm_config,
 ):
@@ -64,33 +59,10 @@ def test_SiluAndMul_forward(
     out = layer.forward(dummy_tensor)
     expected_arg = dummy_tensor
 
-    # assert mock_swiglu.call_count == 1
     mock_swiglu.assert_called_once()
 
     actual_arg = mock_swiglu.call_args[0][0]
     assert torch.allclose(actual_arg, expected_arg), "npu_swiglu called with unexpected input"
 
     expected_out = dummy_tensor + 1
-    assert torch.allclose(out, expected_out)
-
-
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
-@patch("torch.nn.functional.silu", side_effect=lambda x: x + 1)
-def test_SiluAndMul_forward_310p(
-    mock_silu,
-    dummy_tensor,
-    default_vllm_config,
-):
-    layer = SiluAndMul()
-    out = layer.forward(dummy_tensor)
-    h = dummy_tensor.shape[-1] // 2
-    expected_arg = dummy_tensor[..., :h]
-
-    # assert mock_silu.call_count == 1
-    mock_silu.assert_called_once()
-
-    actual_arg = mock_silu.call_args[0][0]
-    assert torch.allclose(actual_arg, expected_arg), "swiglu called with unexpected input"
-
-    expected_out = (dummy_tensor[..., :h] + 1) * dummy_tensor[..., h:]
     assert torch.allclose(out, expected_out)

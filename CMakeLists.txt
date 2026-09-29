@@ -10,8 +10,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
-# TODO: Add 3.12 back when torch-npu support 3.12
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 find_package(pybind11 REQUIRED)
 
@@ -58,22 +57,19 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
 )
 
 if(SOC_VERSION MATCHES "ascend950")
     message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
-if(SOC_VERSION MATCHES "ascend310p.*")
-    message(STATUS "310P hardware detected: skip vllm_ascend_kernels compile")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
+    message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
 else()
     ascendc_library(vllm_ascend_kernels SHARED
         ${VLLM_ASCEND_CUSTOM_OP}
@@ -89,17 +85,22 @@ if(SOC_VERSION MATCHES "ascend310p.*")
 else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
+endif()
+
+# Sparse KV cache offloading is currently supported on Atlas A3 only.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  find_package(OpenMP REQUIRED)
 endif()
 
 include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
   ${TORCH_INCLUDE_DIRS}
-  ${TORCH_NPU_PATH}/include
+  # Prefer the selected CANN toolkit headers over the ACL snapshot bundled in
+  # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
+  ${TORCH_NPU_PATH}/include
 )
 
 set(
@@ -110,6 +111,10 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
+  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
@@ -121,6 +126,19 @@ include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
 set(CMAKE_REQUIRED_LIBRARIES ascendcl)
 set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
+
+# Keep builds on older CANN versions working; endpoint selection must fail
+# explicitly if the installed CANN lacks the user-to-physical conversion.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    int32_t physical_id = 0;
+    return aclrtGetPhyDevIdByUserDevId(0, &physical_id);
+  }
+" HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+if(HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_DEVICE_ID_MAPPING)
+endif()
 
 if(DEFINED VLLM_ASCEND_ENABLE_BATCH_MEMCPY)
   if("${VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")
@@ -157,6 +175,10 @@ if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()
 
+if(NOT (SOC_VERSION MATCHES "ascend310p.*|ascend950"))
+    target_compile_definitions(vllm_ascend_C PRIVATE -DVLLM_ENABLE_ATB_AND_DIRECT_KERNELS)
+endif()
+
 target_link_directories(
   vllm_ascend_C
   PRIVATE
@@ -177,7 +199,7 @@ set(VLLM_ASCEND_C_COMMON_LIBS
   opapi
 )
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   target_link_libraries(
     vllm_ascend_C
     PUBLIC
@@ -194,7 +216,7 @@ endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

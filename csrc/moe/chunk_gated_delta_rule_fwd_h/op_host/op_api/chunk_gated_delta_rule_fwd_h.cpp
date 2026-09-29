@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
     const aclTensor *w,
     const aclTensor *u,
     const aclTensor *g,
+    const aclTensor *gkOptional,
     const aclTensor *initalStateOptional,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
@@ -33,7 +34,7 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
     const aclTensor *finalStateOut,
     aclOpExecutor *executor)
 {
-    L0_DFX(ChunkGatedDeltaRuleFwdH, k, w, u, g, initalStateOptional, cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, hOut, vNewOut, finalStateOut);
+    L0_DFX(ChunkGatedDeltaRuleFwdH, k, w, u, g, gkOptional, initalStateOptional, cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, hOut, vNewOut, finalStateOut);
 
     const aclTensor *actualCuSeqlens = nullptr;
     if (cuSeqlensOptional) {
@@ -56,7 +57,7 @@ const std::array<const aclTensor *, 3> ChunkGatedDeltaRuleFwdH(
     }
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(ChunkGatedDeltaRuleFwdH,
-        OP_INPUT(k, w, u, g, initalStateOptional, actualCuSeqlens, actualChunkIndices),
+        OP_INPUT(k, w, u, g, gkOptional, initalStateOptional, actualCuSeqlens, actualChunkIndices),
         OP_OUTPUT(hOut, vNewOut, finalStateOut),
         OP_ATTR(outputFinalState, chunkSize));
     if (ret != ACLNN_SUCCESS) {
